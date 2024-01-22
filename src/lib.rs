@@ -251,3 +251,98 @@ impl LanguageModel for VLLM {
         })
     }
 }
+
+/// A wrapper around a dataset from the HuggingFace Datasets library.
+#[derive(Debug, Clone)]
+pub struct HuggingFaceDataset {
+    /// Path to the dataset or HuggingFace repo
+    pub name: String,
+    /// Split of the dataset to use
+    pub split: String,
+    /// The dataset (datasets.Dataset)
+    pub dataset: pyo3::PyObject,
+}
+
+/// A single example from a dataset.
+#[derive(Debug, Clone)]
+pub struct DatasetExample {
+    /// The underlying Python object
+    pub example: pyo3::PyObject,
+}
+
+impl HuggingFaceDataset {
+    /// Loads a new dataset from HuggingFace datasets.
+    pub fn load_dataset(
+        name: impl Into<String>,
+        split: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Python::with_gil(|py| {
+            let name = name.into();
+            let split = split.into();
+            let datasets = PyModule::import(py, "datasets")?;
+            let kwargs = vec![("split", split.clone())].into_py_dict(py);
+            let dataset: pyo3::PyObject = datasets
+                .getattr("load_dataset")?
+                .call((name.clone(),), Some(kwargs))?
+                .extract()?;
+            Ok(Self {
+                name,
+                split,
+                dataset,
+            })
+        })
+    }
+}
+
+/// Iterator over a HF dataset.
+pub struct HFDatasetIterator<'a> {
+    /// The dataset
+    pub dataset: &'a HuggingFaceDataset,
+    /// The current index
+    pub index: usize,
+}
+
+impl<'a> Iterator for HFDatasetIterator<'a> {
+    type Item = DatasetExample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Python::with_gil(|py| {
+            let example: pyo3::PyObject = self
+                .dataset
+                .dataset
+                .getattr(py, "__getitem__")?
+                .call1(py, (self.index,))?
+                .extract(py)?;
+            self.index += 1;
+            Ok::<_, pyo3::PyErr>(DatasetExample { example })
+        })
+        .ok()
+    }
+}
+
+impl<'a> IntoIterator for &'a HuggingFaceDataset {
+    type Item = DatasetExample;
+    type IntoIter = HFDatasetIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        HFDatasetIterator {
+            dataset: self,
+            index: 0,
+        }
+    }
+}
+
+impl DatasetExample {
+    /// Gets an element from the example. An example is basically a dictionary.
+    pub fn get<D>(&self, key: impl Into<String>) -> Result<D, Box<dyn std::error::Error>>
+    where
+        D: for<'p> FromPyObject<'p>,
+    {
+        Python::with_gil(|py| {
+            let key = key.into();
+            let pyval = self.example.getattr(py, "__getitem__")?.call1(py, (key,))?;
+            let value = pyval.extract(py)?;
+            Ok(value)
+        })
+    }
+}
